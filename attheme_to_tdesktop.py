@@ -1,105 +1,112 @@
 #!/usr/bin/env python3
 """
-Улучшенный конвертер тем Telegram: Android (.attheme) -> Desktop (.tdesktop-theme)
+Конвертер тем Telegram: Android (.attheme) -> Desktop (.tdesktop-theme)
+
+Версия 2.0:
+  - CLI с argparse (аргументы командной строки)
+  - Извлечение оригинального фона из .attheme
+  - Обработка ошибок и валидация
+  - Цветной вывод в терминал
 """
 import re
+import sys
 import zipfile
 import os
+import argparse
+import struct
+from pathlib import Path
 
-# Material Design 3 цветовая палитра (примерные значения для темной темы)
-# Префиксы: n1_ = neutral1, n2_ = neutral2, a1_ = accent1, a2_ = accent2, a3_ = accent3
+# ─── Цвета терминала ────────────────────────────────────────────────────────
+class Style:
+    """ANSI-цвета для терминала (отключаются если нет поддержки)."""
+    _enabled = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+    RESET  = '\033[0m'  if _enabled else ''
+    BOLD   = '\033[1m'  if _enabled else ''
+    RED    = '\033[91m' if _enabled else ''
+    GREEN  = '\033[92m' if _enabled else ''
+    YELLOW = '\033[93m' if _enabled else ''
+    CYAN   = '\033[96m' if _enabled else ''
+    DIM    = '\033[2m'  if _enabled else ''
+
+def info(msg):
+    print(f"  {Style.CYAN}ℹ{Style.RESET} {msg}")
+
+def success(msg):
+    print(f"  {Style.GREEN}✓{Style.RESET} {msg}")
+
+def warn(msg):
+    print(f"  {Style.YELLOW}⚠{Style.RESET} {msg}")
+
+def error(msg):
+    print(f"  {Style.RED}✗{Style.RESET} {msg}", file=sys.stderr)
+
+def header(msg):
+    print(f"\n{Style.BOLD}{msg}{Style.RESET}")
+
+
+# ─── Material Design 3 палитра ──────────────────────────────────────────────
 MATERIAL_COLORS = {
-    # Neutral1 (серые оттенки)
-    'n1_0': '#000000',
-    'n1_10': '#1c1b1f',
-    'n1_50': '#e6e1e5',
-    'n1_100': '#cac5cd',
-    'n1_200': '#aeaaae',
-    'n1_300': '#938f96',
-    'n1_400': '#79767d',
-    'n1_500': '#605d64',
-    'n1_600': '#49464f',
-    'n1_700': '#33303a',
-    'n1_800': '#1c1b1f',
-    'n1_900': '#1a1a1a',
-    
+    # Neutral1
+    'n1_0': '#000000', 'n1_10': '#1c1b1f', 'n1_50': '#e6e1e5',
+    'n1_100': '#cac5cd', 'n1_200': '#aeaaae', 'n1_300': '#938f96',
+    'n1_400': '#79767d', 'n1_500': '#605d64', 'n1_600': '#49464f',
+    'n1_700': '#33303a', 'n1_800': '#1c1b1f', 'n1_900': '#1a1a1a',
     # Neutral2
-    'n2_0': '#000000',
-    'n2_100': '#cac5cd',
-    'n2_200': '#aeaaae',
-    'n2_300': '#938f96',
-    'n2_400': '#79767d',
-    'n2_500': '#605d64',
-    'n2_600': '#49464f',
-    'n2_700': '#33303a',
-    'n2_800': '#29282c',
+    'n2_0': '#000000', 'n2_100': '#cac5cd', 'n2_200': '#aeaaae',
+    'n2_300': '#938f96', 'n2_400': '#79767d', 'n2_500': '#605d64',
+    'n2_600': '#49464f', 'n2_700': '#33303a', 'n2_800': '#29282c',
     'n2_900': '#1c1b1f',
-    
-    # Accent1 (основной акцентный цвет - синий/фиолетовый)
-    'a1_0': '#000000',
-    'a1_50': '#eee1f7',
-    'a1_100': '#d0bcff',
-    'a1_200': '#b69df8',
-    'a1_300': '#9a82db',
-    'a1_400': '#7f67be',
-    'a1_500': '#6750a4',
-    'a1_600': '#4f378b',
-    'a1_700': '#381e72',
-    'a1_800': '#23036a',
-    'a1_900': '#1c1b1f',
-    
+    # Accent1
+    'a1_0': '#000000', 'a1_50': '#eee1f7', 'a1_100': '#d0bcff',
+    'a1_200': '#b69df8', 'a1_300': '#9a82db', 'a1_400': '#7f67be',
+    'a1_500': '#6750a4', 'a1_600': '#4f378b', 'a1_700': '#381e72',
+    'a1_800': '#23036a', 'a1_900': '#1c1b1f',
     # Accent2
-    'a2_0': '#000000',
-    'a2_100': '#ffd7f1',
-    'a2_200': '#efb8c8',
-    'a2_300': '#d29dad',
-    'a2_400': '#b6839a',
-    'a2_500': '#9a6b88',
-    'a2_600': '#7f5376',
-    'a2_700': '#633b63',
-    'a2_800': '#48244f',
+    'a2_0': '#000000', 'a2_100': '#ffd7f1', 'a2_200': '#efb8c8',
+    'a2_300': '#d29dad', 'a2_400': '#b6839a', 'a2_500': '#9a6b88',
+    'a2_600': '#7f5376', 'a2_700': '#633b63', 'a2_800': '#48244f',
     'a2_900': '#2e0e39',
-    
     # Accent3
-    'a3_0': '#000000',
-    'a3_100': '#f6edff',
-    'a3_200': '#d6cadf',
-    'a3_300': '#b9aec4',
-    'a3_400': '#9d93a9',
-    'a3_500': '#827990',
-    'a3_600': '#686077',
-    'a3_700': '#4e475f',
-    'a3_800': '#353048',
+    'a3_0': '#000000', 'a3_100': '#f6edff', 'a3_200': '#d6cadf',
+    'a3_300': '#b9aec4', 'a3_400': '#9d93a9', 'a3_500': '#827990',
+    'a3_600': '#686077', 'a3_700': '#4e475f', 'a3_800': '#353048',
     'a3_900': '#1c1b1f',
-    
-    # Предопределенные Material цвета
-    'mWhite': '#ffffff',
-    'mBlack': '#000000',
-    'mGreen500': '#4caf50',
-    'mRed200': '#ef9a9a',
-    'mRed500': '#f44336',
+    # Material предопределённые
+    'mWhite': '#ffffff', 'mBlack': '#000000',
+    'mGreen500': '#4caf50', 'mRed200': '#ef9a9a', 'mRed500': '#f44336',
 }
 
+
+# ─── Парсинг цветов ─────────────────────────────────────────────────────────
 def parse_color_value(value, color_vars=None):
-    """Парсит значение цвета из Android темы"""
+    """Парсит значение цвета из Android темы.
+
+    Поддерживает форматы:
+      - hex: #1a1a1a
+      - Material Design: n1_900, a1_200, mWhite
+      - ссылки на другие переменные
+      - alpha/lightness модификаторы: n1_800(a=80), primaryDark(l=70)
+      - ARGB числа: -14643754h, 2147483647
+    """
     if color_vars is None:
         color_vars = {}
-    
+
     value = value.strip()
-    
-    # Если это уже hex цвет
+
+    # hex
     if value.startswith('#'):
         return value
-    
-    # Если это ссылка на Material Design цвет
+
+    # Material Design
     if value in MATERIAL_COLORS:
         return MATERIAL_COLORS[value]
-    
-    # Если это ссылка на другую переменную
+
+    # Ссылка на переменную (с защитой от рекурсии)
     if value in color_vars:
         return parse_color_value(color_vars[value], color_vars)
-    
-    # Обработка значения с альфа-каналом в скобках
+
+    # alpha модификатор: name(a=80)
     match = re.match(r'(.+?)\s*\(a=(\d+)\)', value)
     if match:
         base = match.group(1).strip()
@@ -109,29 +116,26 @@ def parse_color_value(value, color_vars=None):
             rgb = base_color.lstrip('#')[:6]
             alpha_hex = format(int(alpha * 255 / 100), '02x')
             return f'#{rgb}{alpha_hex}'
-    
-    # Обработка значения с прозрачностью в формате (l=X)
+
+    # lightness модификатор: name(l=X) — просто берём базовый цвет
     match = re.match(r'(.+?)\s*\(l=(\d+)\)', value)
     if match:
         base = match.group(1).strip()
         return parse_color_value(base, color_vars)
-    
-    # Если это отрицательное hex число
+
+    # Hex с суффиксом: -14643754h
     if value.endswith('h'):
         try:
-            hex_str = value[:-1]
-            if hex_str.startswith('-'):
-                hex_str = hex_str[1:]
-            # Конвертируем ARGB в RGB
+            hex_str = value[:-1].lstrip('-')
             num = int(hex_str, 16)
             r = (num >> 16) & 0xFF
             g = (num >> 8) & 0xFF
             b = num & 0xFF
             return f'#{r:02x}{g:02x}{b:02x}'
-        except:
+        except ValueError:
             pass
-    
-    # Если это десятичное число (Android ARGB)
+
+    # Десятичное число (Android signed ARGB int)
     try:
         num = int(value)
         if num < 0:
@@ -140,102 +144,261 @@ def parse_color_value(value, color_vars=None):
         r = (num >> 16) & 0xFF
         g = (num >> 8) & 0xFF
         b = num & 0xFF
-        if a < 255 and a > 0:
+        if 0 < a < 255:
             return f'#{r:02x}{g:02x}{b:02x}{a:02x}'
         return f'#{r:02x}{g:02x}{b:02x}'
-    except:
+    except ValueError:
         pass
-    
-    # Если ничего не подошло, возвращаем исходное значение
+
     return value
 
 
+# ─── Извлечение фона из .attheme ────────────────────────────────────────────
+# В .attheme файлах фоновое изображение хранится как бинарные данные
+# после маркера «WPS\n» и до маркера «\nWPE\n» (Wallpaper Start / Wallpaper End).
+# Бинарные данные — это обычный JPEG.
+
+WPS_MARKER = b'WPS\n'
+WPE_MARKER = b'\nWPE\n'
+
+def extract_wallpaper(attheme_path):
+    """Извлекает встроенное изображение обоев из .attheme файла.
+
+    Возвращает bytes с JPEG-данными или None, если обои не встроены.
+    """
+    try:
+        with open(attheme_path, 'rb') as f:
+            data = f.read()
+    except OSError as e:
+        warn(f"Не удалось прочитать файл для извлечения обоев: {e}")
+        return None
+
+    wps_idx = data.find(WPS_MARKER)
+    if wps_idx == -1:
+        return None
+
+    img_start = wps_idx + len(WPS_MARKER)
+    wpe_idx = data.find(WPE_MARKER, img_start)
+    if wpe_idx == -1:
+        # Иногда маркер WPE отсутствует — берём всё до конца
+        img_data = data[img_start:]
+    else:
+        img_data = data[img_start:wpe_idx]
+
+    if len(img_data) < 100:
+        return None
+
+    # Проверяем что это действительно JPEG
+    if img_data[:2] == b'\xff\xd8':
+        return img_data
+
+    # Или PNG
+    if img_data[:4] == b'\x89PNG':
+        return img_data
+
+    warn("Встроенные данные обоев не распознаны как JPEG/PNG")
+    return None
+
+
+# ─── Загрузка цветов ─────────────────────────────────────────────────────────
 def load_android_colors(attheme_path):
-    """Загружает все цвета из Android темы"""
+    """Загружает все цвета из Android .attheme файла.
+
+    Читает только текстовую часть (до маркера WPS, если есть).
+    """
+    try:
+        with open(attheme_path, 'rb') as f:
+            raw = f.read()
+    except OSError as e:
+        error(f"Не удалось открыть файл: {e}")
+        sys.exit(1)
+
+    # Отсекаем бинарные данные обоев
+    wps_idx = raw.find(WPS_MARKER)
+    if wps_idx != -1:
+        raw = raw[:wps_idx]
+
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        text = raw.decode('utf-8', errors='replace')
+
     colors = {}
-    
-    with open(attheme_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('//') or line == 'end':
-                continue
-            
-            if '=' in line:
-                key, value = line.split('=', 1)
-                key = key.strip()
-                value = value.strip()
-                colors[key] = value
-    
-    # Второй проход для разрешения ссылок
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('//') or line == 'end':
+            continue
+        if '=' in line:
+            key, value = line.split('=', 1)
+            colors[key.strip()] = value.strip()
+
+    # Разрешаем ссылки
     resolved = {}
     for key, value in colors.items():
         resolved[key] = parse_color_value(value, colors)
-    
+
     return resolved
 
 
+# ─── Утилиты ─────────────────────────────────────────────────────────────────
 def adjust_brightness(color, percent):
-    """Регулирует яркость цвета на заданный процент"""
+    """Регулирует яркость hex-цвета на заданный процент."""
     if not color or not color.startswith('#'):
         return color
-    
-    color = color.lstrip('#')
-    
-    # Обработка альфа-канала
-    has_alpha = len(color) == 8
-    if has_alpha:
-        rgb = color[:6]
-        alpha = color[6:]
-    else:
-        rgb = color
-        alpha = ''
-    
-    # Конвертируем в RGB
+
+    color_body = color.lstrip('#')
+    has_alpha = len(color_body) == 8
+    rgb = color_body[:6]
+    alpha = color_body[6:] if has_alpha else ''
+
     try:
         r = int(rgb[0:2], 16)
         g = int(rgb[2:4], 16)
         b = int(rgb[4:6], 16)
-    except:
-        return '#' + color
-    
-    # Регулируем яркость
+    except ValueError:
+        return '#' + color_body
+
     factor = 1 + (percent / 100)
     r = max(0, min(255, int(r * factor)))
     g = max(0, min(255, int(g * factor)))
     b = max(0, min(255, int(b * factor)))
-    
-    # Возвращаем hex
+
     result = f'#{r:02x}{g:02x}{b:02x}'
     if has_alpha:
         result += alpha
-    
     return result
 
 
-def create_desktop_theme(attheme_path, output_path):
-    """Создает десктопную тему из Android темы"""
-    
-    print("Загрузка цветов из Android темы...")
+def blend_colors(color1, color2, amount=0.5):
+    """Смешивает два hex-цвета. amount=0 → color1, amount=1 → color2."""
+    if not color1 or not color1.startswith('#'):
+        return color2
+    if not color2 or not color2.startswith('#'):
+        return color1
+
+    def to_rgb(h):
+        h = h.lstrip('#')[:6]
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    try:
+        r1, g1, b1 = to_rgb(color1)
+        r2, g2, b2 = to_rgb(color2)
+    except (ValueError, IndexError):
+        return color1
+
+    r = int(r1 * (1 - amount) + r2 * amount)
+    g = int(g1 * (1 - amount) + g2 * amount)
+    b = int(b1 * (1 - amount) + b2 * amount)
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
+def generate_gradient_background(background, primary_color, output_file):
+    """Генерирует фоновое PNG-изображение с градиентом (fallback)."""
+    try:
+        from PIL import Image, ImageDraw
+        import math
+    except ImportError:
+        warn("Pillow не установлен — фоновое изображение не создано.")
+        warn("Установите: pip install Pillow")
+        return False
+
+    width, height = 1024, 768
+    img = Image.new('RGB', (width, height))
+    draw = ImageDraw.Draw(img)
+
+    # Парсим цвета
+    def hex_to_rgb(h, default):
+        try:
+            h = h.lstrip('#')[:6]
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        except (ValueError, IndexError):
+            return default
+
+    base = hex_to_rgb(background, (26, 26, 26))
+    accent = hex_to_rgb(primary_color, (182, 157, 248))
+
+    # Градиент
+    for y in range(height):
+        blend = y / height
+        r = int(base[0] * (1 - blend * 0.3) + base[0] * 1.3 * blend * 0.3)
+        g = int(base[1] * (1 - blend * 0.3) + base[1] * 1.3 * blend * 0.3)
+        b = int(base[2] * (1 - blend * 0.3) + base[2] * 1.3 * blend * 0.3)
+        draw.line([(0, y), (width, y)], fill=(
+            min(255, max(0, r)),
+            min(255, max(0, g)),
+            min(255, max(0, b)),
+        ))
+
+    # Акцентные круги
+    pixels = img.load()
+    circles = [
+        (width * 0.85, -height * 0.1, height * 0.6, 0.03),
+        (-width * 0.1, height * 1.1, height * 0.4, 0.02),
+    ]
+    for cx, cy, radius, strength in circles:
+        # Ограничиваем область перебора bounding-box'ом круга
+        x_min = max(0, int(cx - radius))
+        x_max = min(width, int(cx + radius) + 1)
+        y_min = max(0, int(cy - radius))
+        y_max = min(height, int(cy + radius) + 1)
+        for y in range(y_min, y_max):
+            for x in range(x_min, x_max):
+                dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+                if dist < radius:
+                    alpha = (1 - dist / radius) * strength
+                    pr, pg, pb = pixels[x, y]
+                    pixels[x, y] = (
+                        int(pr * (1 - alpha) + accent[0] * alpha),
+                        int(pg * (1 - alpha) + accent[1] * alpha),
+                        int(pb * (1 - alpha) + accent[2] * alpha),
+                    )
+
+    img.save(output_file, optimize=True, quality=85)
+    return True
+
+
+# ─── Генерация темы ──────────────────────────────────────────────────────────
+def create_desktop_theme(attheme_path, output_path, *, no_bg=False):
+    """Создаёт .tdesktop-theme из .attheme файла."""
+
+    attheme_path = Path(attheme_path)
+    output_path = Path(output_path)
+
+    # ── Валидация ────────────────────────────────────────────────────────
+    if not attheme_path.exists():
+        error(f"Файл не найден: {attheme_path}")
+        sys.exit(1)
+
+    if not attheme_path.suffix == '.attheme':
+        warn(f"Файл не имеет расширения .attheme — продолжаю всё равно")
+
+    if output_path.suffix != '.tdesktop-theme':
+        warn("Выходной файл обычно имеет расширение .tdesktop-theme")
+
+    header("🎨 Конвертация Android → Desktop темы")
+    info(f"Входной файл:  {attheme_path}")
+    info(f"Выходной файл: {output_path}")
+
+    # ── Загрузка цветов ──────────────────────────────────────────────────
+    info("Загрузка цветов из Android темы...")
     colors = load_android_colors(attheme_path)
-    
-    # Определяем основные цвета темы
+    success(f"Загружено {len(colors)} параметров цвета")
+
     primary_color = colors.get('windowBackgroundWhiteBlueText', '#6750a4')
     background = colors.get('windowBackgroundWhite', '#1c1b1f')
     text_color = colors.get('windowBackgroundWhiteBlackText', '#e6e1e5')
-    
-    # Получаем другие ключевые цвета
     msg_in_bg = colors.get('chat_inBubble', '#2b2930')
     msg_out_bg = colors.get('chat_outBubble', primary_color)
     msg_panel_bg = colors.get('chat_messagePanelBackground', background)
-    
-    print(f"Основной цвет: {primary_color}")
-    print(f"Фон: {background}")
-    print(f"Текст: {text_color}")
-    
-    # Создаем содержимое colors.tdesktop-theme
-    theme_content = f"""// Monet Dark Theme - Desktop Version
-// Converted from Android theme
-// Conversion date: 2026-01-03
+
+    info(f"Основной:  {primary_color}")
+    info(f"Фон:       {background}")
+    info(f"Текст:     {text_color}")
+
+    # ── Генерация colors.tdesktop-theme ──────────────────────────────────
+    theme_content = f"""// Telegram Desktop Theme
+// Converted from: {attheme_path.name}
+// Generator: attheme-to-tdesktop v2.0
 
 // Define Color Scheme
 primaryColor: {primary_color};
@@ -336,23 +499,23 @@ dialogsUnreadBgOver: dialogsUnreadBg;
 dialogsUnreadBgMutedOver: dialogsUnreadBgMuted;
 dialogsUnreadFgOver: dialogsUnreadFg;
 
-dialogsBgActive: primaryColor;
-dialogsNameFgActive: #ffffff;
-dialogsChatIconFgActive: #ffffff;
-dialogsDateFgActive: #ffffff;
-dialogsTextFgActive: #ffffff;
-dialogsTextFgServiceActive: #ffffff;
-dialogsDraftFgActive: #ffffff;
-dialogsVerifiedIconBgActive: #ffffff;
-dialogsVerifiedIconFgActive: primaryColor;
-dialogsSendingIconFgActive: #ffffff;
-dialogsSentIconFgActive: #ffffff;
-dialogsUnreadBgActive: #ffffff;
-dialogsUnreadBgMutedActive: #ffffff;
-dialogsUnreadFgActive: primaryColor;
+dialogsBgActive: {blend_colors(adjust_brightness(colors.get('chats_menuBackground', background), 100), primary_color, 0.2)};
+dialogsNameFgActive: primaryText;
+dialogsChatIconFgActive: primaryColor;
+dialogsDateFgActive: secondaryText;
+dialogsTextFgActive: secondaryText;
+dialogsTextFgServiceActive: primaryColor;
+dialogsDraftFgActive: {colors.get('chats_draft', '#f44336')};
+dialogsVerifiedIconBgActive: primaryColor;
+dialogsVerifiedIconFgActive: #ffffff;
+dialogsSendingIconFgActive: secondaryText;
+dialogsSentIconFgActive: primaryColor;
+dialogsUnreadBgActive: primaryColor;
+dialogsUnreadBgMutedActive: windowSubTextFg;
+dialogsUnreadFgActive: #ffffff;
 
-dialogsRippleBg: primaryColor;
-dialogsRippleBgActive: #ffffff80;
+dialogsRippleBg: {adjust_brightness(background, 60)};
+dialogsRippleBgActive: {blend_colors(adjust_brightness(background, 130), primary_color, 0.25)};
 
 dialogsForwardBg: dialogsBgActive;
 dialogsForwardFg: dialogsNameFgActive;
@@ -703,109 +866,223 @@ mediaPlayerActiveFg: windowBgActive;
 mediaPlayerInactiveFg: sliderBgInactive;
 mediaPlayerDisabledFg: #9dd1ef;
 """
-    
-    # Записываем файл colors.tdesktop-theme
-    colors_file = '/home/claude/colors.tdesktop-theme'
+
+    # ── Временные файлы ──────────────────────────────────────────────────
+    import tempfile
+    work_dir = tempfile.mkdtemp(prefix='tg_theme_')
+    colors_file = os.path.join(work_dir, 'colors.tdesktop-theme')
+
     with open(colors_file, 'w', encoding='utf-8') as f:
         f.write(theme_content)
-    
-    # Создаём фоновое изображение
-    try:
-        from PIL import Image, ImageDraw
-        import math
-        
-        bg_file = '/home/claude/background.png'
-        
-        width, height = 1024, 768
-        img = Image.new('RGB', (width, height))
-        draw = ImageDraw.Draw(img)
-        
-        # Получаем цвета из темы
-        try:
-            bg_hex = background.lstrip('#')
-            base_r = int(bg_hex[0:2], 16)
-            base_g = int(bg_hex[2:4], 16)
-            base_b = int(bg_hex[4:6], 16)
-        except:
-            base_r, base_g, base_b = 26, 26, 26
-        
-        try:
-            accent_hex = primary_color.lstrip('#')
-            accent_r = int(accent_hex[0:2], 16)
-            accent_g = int(accent_hex[2:4], 16)
-            accent_b = int(accent_hex[4:6], 16)
-        except:
-            accent_r, accent_g, accent_b = 182, 157, 248
-        
-        base_color = (base_r, base_g, base_b)
-        accent_color = (accent_r, accent_g, accent_b)
-        
-        # Создаём тонкий градиент
-        for y in range(height):
-            blend = y / height
-            r = int(base_color[0] * (1 - blend * 0.3) + base_color[0] * 1.3 * blend * 0.3)
-            g = int(base_color[1] * (1 - blend * 0.3) + base_color[1] * 1.3 * blend * 0.3)
-            b = int(base_color[2] * (1 - blend * 0.3) + base_color[2] * 1.3 * blend * 0.3)
-            
-            r = min(255, max(0, r))
-            g = min(255, max(0, g))
-            b = min(255, max(0, b))
-            
-            draw.line([(0, y), (width, y)], fill=(r, g, b))
-        
-        # Добавляем тонкие акцентные круги
-        pixels = img.load()
-        
-        # Большой круг в правом верхнем углу
-        cx1, cy1, radius1 = width * 0.85, -height * 0.1, height * 0.6
-        for y in range(height):
-            for x in range(width):
-                dist = math.sqrt((x - cx1)**2 + (y - cy1)**2)
-                if dist < radius1:
-                    alpha = (1 - dist / radius1) * 0.03
-                    r, g, b = pixels[x, y]
-                    r = int(r * (1 - alpha) + accent_color[0] * alpha)
-                    g = int(g * (1 - alpha) + accent_color[1] * alpha)
-                    b = int(b * (1 - alpha) + accent_color[2] * alpha)
-                    pixels[x, y] = (r, g, b)
-        
-        # Маленький круг в левом нижнем углу
-        cx2, cy2, radius2 = -width * 0.1, height * 1.1, height * 0.4
-        for y in range(height):
-            for x in range(width):
-                dist = math.sqrt((x - cx2)**2 + (y - cy2)**2)
-                if dist < radius2:
-                    alpha = (1 - dist / radius2) * 0.02
-                    r, g, b = pixels[x, y]
-                    r = int(r * (1 - alpha) + accent_color[0] * alpha)
-                    g = int(g * (1 - alpha) + accent_color[1] * alpha)
-                    b = int(b * (1 - alpha) + accent_color[2] * alpha)
-                    pixels[x, y] = (r, g, b)
-        
-        img.save(bg_file, optimize=True, quality=85)
-        print("✓ Фоновое изображение создано")
-    except Exception as e:
-        print(f"⚠ Не удалось создать фоновое изображение: {e}")
-        bg_file = None
-    
-    # Создаем ZIP архив
-    print(f"Создание архива {output_path}...")
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    success("Файл цветов сгенерирован")
+
+    # ── Фоновое изображение ──────────────────────────────────────────────
+    bg_file = None
+
+    if not no_bg:
+        # Сначала пробуем извлечь оригинальный фон из .attheme
+        info("Поиск встроенного фонового изображения...")
+        wallpaper_data = extract_wallpaper(attheme_path)
+
+        if wallpaper_data:
+            # Определяем расширение
+            if wallpaper_data[:4] == b'\x89PNG':
+                ext = '.png'
+            else:
+                ext = '.jpg'
+
+            bg_file = os.path.join(work_dir, f'background{ext}')
+            with open(bg_file, 'wb') as f:
+                f.write(wallpaper_data)
+            bg_name = f'background{ext}'
+            success(f"Извлечён оригинальный фон из темы ({len(wallpaper_data) // 1024} КБ)")
+        else:
+            info("Встроенный фон не найден — генерирую градиент...")
+            bg_file = os.path.join(work_dir, 'background.png')
+            bg_name = 'background.png'
+            if generate_gradient_background(background, primary_color, bg_file):
+                success("Градиентный фон создан")
+            else:
+                bg_file = None
+
+    # ── Сборка ZIP ───────────────────────────────────────────────────────
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    info(f"Создание архива...")
+    with zipfile.ZipFile(str(output_path), 'w', zipfile.ZIP_DEFLATED) as zipf:
         zipf.write(colors_file, 'colors.tdesktop-theme')
         if bg_file and os.path.exists(bg_file):
-            zipf.write(bg_file, 'background.png')
-            print("✓ Фоновое изображение добавлено в архив")
-    
-    print(f"✓ Тема успешно создана: {output_path}")
-    print(f"\nИнструкция по установке:")
-    print("1. Скачайте файл Monet_Dark.tdesktop-theme")
-    print("2. Откройте Telegram Desktop")
-    print("3. Перетащите файл темы в окно Telegram")
-    print("4. Нажмите 'Apply theme' для применения темы")
+            zipf.write(bg_file, bg_name)
+
+    # Размер файла
+    size_kb = output_path.stat().st_size / 1024
+
+    # Чистим временные файлы
+    import shutil
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+    header("✅ Готово!")
+    success(f"Тема: {output_path}  ({size_kb:.1f} КБ)")
+    print()
+    print(f"  {Style.DIM}Установка:{Style.RESET}")
+    print(f"  {Style.DIM}1. Откройте Telegram Desktop{Style.RESET}")
+    print(f"  {Style.DIM}2. Перетащите файл в окно Telegram{Style.RESET}")
+    print(f"  {Style.DIM}3. Нажмите «Apply theme»{Style.RESET}")
+    print()
+
+
+# ─── CLI ─────────────────────────────────────────────────────────────────────
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog='attheme_to_tdesktop',
+        description='Конвертер тем Telegram: Android (.attheme) → Desktop (.tdesktop-theme)',
+        epilog='Примеры:\n'
+               '  %(prog)s                           — интерактивный выбор файла\n'
+               '  %(prog)s Monet_Dark.attheme         — конвертация с авто-именем\n'
+               '  %(prog)s theme.attheme -o out.tdesktop-theme\n'
+               '  %(prog)s theme.attheme --no-bg\n'
+               '  %(prog)s theme.attheme --extract-bg wallpaper.jpg\n'
+               '  %(prog)s theme.attheme --list-colors\n',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        'input',
+        nargs='?',
+        default=None,
+        help='Путь к .attheme файлу (если не указан — скрипт спросит интерактивно)',
+    )
+    parser.add_argument(
+        '-o', '--output',
+        help='Путь к выходному .tdesktop-theme файлу '
+             '(по умолчанию: <имя_входного>.tdesktop-theme)',
+    )
+    parser.add_argument(
+        '--no-bg',
+        action='store_true',
+        help='Не добавлять фоновое изображение в тему',
+    )
+    parser.add_argument(
+        '--extract-bg',
+        metavar='FILE',
+        help='Только извлечь встроенный фон из .attheme в указанный файл и выйти',
+    )
+    parser.add_argument(
+        '--list-colors',
+        action='store_true',
+        help='Показать все цвета из .attheme файла и выйти',
+    )
+    parser.add_argument(
+        '-v', '--version',
+        action='version',
+        version='%(prog)s 2.0',
+    )
+    return parser
+
+
+def find_attheme_files():
+    """Ищет .attheme файлы в текущей директории."""
+    return sorted(Path('.').glob('*.attheme'))
+
+
+def ask_input_file():
+    """Интерактивно запрашивает путь к .attheme файлу.
+
+    Если в текущей папке есть .attheme файлы — предлагает выбрать из списка.
+    """
+    found = find_attheme_files()
+
+    if found:
+        print()
+        header("Найдены .attheme файлы в текущей папке:")
+        for i, f in enumerate(found, 1):
+            size_kb = f.stat().st_size / 1024
+            print(f"  {Style.CYAN}{i}{Style.RESET}) {f.name}  {Style.DIM}({size_kb:.0f} КБ){Style.RESET}")
+
+        print(f"  {Style.CYAN}0{Style.RESET}) Ввести путь вручную")
+        print()
+
+        while True:
+            try:
+                choice = input(f"  Выберите файл [1-{len(found)}, 0]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(0)
+
+            if choice == '0' or choice == '':
+                break
+
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(found):
+                    return found[idx]
+            except ValueError:
+                # Может быть это путь к файлу
+                p = Path(choice)
+                if p.exists():
+                    return p
+
+            warn(f"Введите число от 0 до {len(found)}")
+
+    # Ручной ввод
+    print()
+    while True:
+        try:
+            path_str = input("  Путь к .attheme файлу: ").strip().strip('"').strip("'")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+
+        if not path_str:
+            warn("Путь не может быть пустым")
+            continue
+
+        p = Path(path_str)
+        if p.exists():
+            return p
+        else:
+            error(f"Файл не найден: {p}")
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # ── Определяем входной файл ──────────────────────────────────────────
+    if args.input:
+        input_path = Path(args.input)
+    else:
+        input_path = ask_input_file()
+
+    # ── --extract-bg ─────────────────────────────────────────────────────
+    if args.extract_bg:
+        info(f"Извлечение фона из {input_path}...")
+        wallpaper = extract_wallpaper(input_path)
+        if wallpaper is None:
+            error("В этом .attheme файле нет встроенного фонового изображения")
+            sys.exit(1)
+        out = Path(args.extract_bg)
+        out.write_bytes(wallpaper)
+        success(f"Фон сохранён: {out}  ({len(wallpaper) // 1024} КБ)")
+        return
+
+    # ── --list-colors ────────────────────────────────────────────────────
+    if args.list_colors:
+        colors = load_android_colors(input_path)
+        header(f"Цвета из {input_path.name}  ({len(colors)} шт.)")
+        max_key = max(len(k) for k in colors) if colors else 0
+        for key in sorted(colors):
+            val = colors[key]
+            print(f"  {key:<{max_key}}  {val}")
+        return
+
+    # ── Обычная конвертация ──────────────────────────────────────────────
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = input_path.with_suffix('.tdesktop-theme')
+
+    create_desktop_theme(input_path, output_path, no_bg=args.no_bg)
 
 
 if __name__ == '__main__':
-    attheme_path = '/mnt/user-data/uploads/Monet_Dark.attheme'
-    output_path = '/mnt/user-data/outputs/Monet_Dark.tdesktop-theme'
-    
-    create_desktop_theme(attheme_path, output_path)
+    main()
